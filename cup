@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+
+# TODO
+# - Make sure .DS_Store and .git (and all other, deep and not, .* files) are excluded
+
+usage="$(basename $0) <init|up>"
+cupfilename=.cup
+
+if [[ -z "$1" ]]; then
+	echo "usage: $usage"
+fi
+
+err() {
+	>&2 echo $1
+}
+
+get_cupfile() {
+	dir="$1"
+	if [[ -r "$dir/$cupfilename" ]]; then
+		echo -n "$dir/$cupfilename"
+		return
+	fi
+	if [[ "$dir" == "/" ]]; then
+		return
+	fi
+	get_cupfile $(dirname $dir)
+}
+
+cupfile=$(get_cupfile $(pwd))
+
+prereqs() {
+	which -s aws
+	if [[ $? != 0 ]]; then
+		err "please install awscli"
+		exit 5
+	fi
+}
+
+init() {
+	set -e
+	echo -n "profile: "
+	read profile
+	echo -n "bucket: "
+	read bucket
+	echo -n "dir [.]: "
+	read dir
+	echo "Launching aws configure with selected profile"
+	aws --profile $profile configure
+	echo "AWS configured"
+	create_cupfile "./$cupfilename" "$profile" "$dir" "$bucket"
+	echo -n "public? <yes|no> "
+	read public
+	if [[ "$public" == "yes" ]]; then
+		create_robots "$dir" public
+	else
+		create_robots "$dir" private
+	fi
+	if [[ -r ".gitignore" ]]; then
+		amend_gitignore
+	fi
+}
+create_cupfile() {
+	cupfile="$1"
+	profile="$2"
+	dir="$3"
+	bucket="$4"
+	if [[ -z "$profile" ]]; then
+		err "missing profile"
+		exit 2
+	fi
+	if [[ -z "$dir" ]]; then
+		err "missing dir"
+		exit 3
+	fi
+	if [[ -z "$bucket" ]]; then
+		err "missing bucket"
+		exit 4
+	fi
+	cat <<EOC >> "$cupfile"
+profile: $profile
+dir: $dir
+bucket: $bucket
+EOC
+}
+amend_gitignore() {
+	echo ".cup" >> .gitignore
+	err "added .cup to .gitignore due to dir=."
+}
+create_robots() {
+	dir="$1"
+	mode="$2"
+	if [[ "$mode" == "private" ]]; then
+		cat <<EOR >> "$dir/robots.txt"
+User-agent: *
+Disallow: /
+EOR
+	elif [[ "$mode" == "public" ]]; then
+		cat <<EOR >> "$dir/robots.txt"
+User-agent: *
+Disallow:
+EOR
+	fi
+}
+
+get_config() {
+	file="$1"
+	param="$2"
+	if [[ -z "$file" ]]; then
+		exit 10
+	fi
+	if [[ -z "$param" ]]; then
+		exit 11
+	fi
+	while read -r line || [[ -n $line ]]; do
+		if [[ -z "$line" ]]; then
+			continue
+		fi
+		if [[ ${line:0:1} == "#" ]]; then
+			continue
+		fi
+		line_param=$(cut -d':' -f1 <<< "$line")
+		if [[ "$line_param" == "$param" ]]; then
+			echo -n $(cut -d':' -f2 <<< "$line")
+			return
+		fi
+	done <<< "$(cat $file)"
+	err "file incomplete (missing $param)"
+	exit 6
+}
+
+up() {
+	cd $(dirname $cupfile)
+	profile="$1"
+	dir="$2"
+	bucket="$3"
+	dryrun="$4"
+	aws --profile "$profile" --color on s3 sync "$dir/" "s3://$bucket/" --acl public-read --exclude ".*" --exclude "*/.*" $dryrun
+}
+
+case "$1" in
+	init)
+		shift
+		if [[ -r $cupfile ]]; then
+			err ".cup already exists"
+			exit 1
+		fi
+		prereqs
+		init
+		;;
+	up)
+		shift
+		set -e
+		profile=$(get_config "$cupfile" profile)
+		dir=$(get_config "$cupfile" dir)
+		bucket=$(get_config "$cupfile" bucket)
+		if [[ "$1" == "--dry" ]]; then
+			dryrun="--dryrun"
+		else
+			dryrun=""
+		fi
+		up $profile $dir $bucket $dryrun
+		;;
+esac
